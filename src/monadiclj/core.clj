@@ -26,10 +26,10 @@
 (defn monad?     [x] (satisfies? Monad x))
 
 (defmacro >>= [m & fs]
-  (let [argsym '%]
+  (let [argsym '_]
     `(-> ~m ~@(map (fn [f]
                      (if (list? f)
-                       `(bind (fn [~argsym] (~(first f) ~argsym ~@(rest f))))
+                       `(bind (fn [~argsym] ~f))
                        `(bind ~f))) fs))))
 
 (defmacro >> [m & ms]
