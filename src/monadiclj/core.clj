@@ -14,7 +14,7 @@
 (defprotocol Monad
   (join [m])
   (bind [m f])
-  (then [m ma]))
+  (then [ma mb]))
 
 (defprotocol MonadPlus
   (mzero [m])
@@ -25,7 +25,41 @@
 (defn functor?   [x] (satisfies? Functor x))
 (defn monad?     [x] (satisfies? Monad x))
 
-(defrecord UnitSet [=] Semigroup)
+(defmacro >>= [m & fs]
+  (let [argsym '%]
+    `(-> ~m ~@(map (fn [f]
+                     (if (list? f)
+                       `(bind (fn [~argsym] (~(first f) ~argsym ~@(rest f))))
+                       `(bind ~f))) fs))))
+
+(defmacro >> [m & ms]
+  `(-> ~m ~@(map (fn [m] `(then ~m)) ms)))
+
+(defmacro ^{:private true} assert-args [fnname & pairs]
+  `(do (when-not ~(first pairs)
+         (throw (IllegalArgumentException.
+                 ~(str fnname " requires " (second pairs)))))
+       ~(let [more (nnext pairs)]
+          (when more
+            (list* `assert-args fnname more)))))
+
+(defmacro domonad [bindings & body]
+  (assert-args
+   domonad
+   (vector? bindings) "a vector for its binding"
+   (even? (count bindings)) "an even number of forms in binding vector")
+  (let [var  (first   bindings)
+        val  (second  bindings)
+        next (nthrest bindings 2)]
+    (if (seq next)
+      `(bind ~val
+             (fn [~var]
+               (domonad [~@next] ~@body)))
+      `(bind ~val
+             (fn [~var]
+               ~@body)))))
+
+(defrecord UnitSet [<-] Semigroup)
 (defrecord EmptySet [] Semigroup)
 
 (defn unit-set?  [x] (instance? UnitSet x))
@@ -36,15 +70,15 @@
   (mempty  [m] (EmptySet.))
   (mappend [ma mb]
     (cond (empty-set? mb) ma
-          (unit-set?  mb) (UnitSet. (mappend (:= ma) (:= mb)))))
+          (unit-set?  mb) (UnitSet. (mappend (:<- ma) (:<- mb)))))
   (mconcat [m] (mappend m (mempty m)))
   Functor
-  (fmap [m f] (UnitSet. (f (:= m))))
+  (fmap [m f] (UnitSet. (f (:<- m))))
   Monad
-  (join [m] (let [a (:=  m)]
+  (join [m] (let [a (:<-  m)]
               (if (monad? a) (join a) (UnitSet. a))))
   (bind [m f]  (join (fmap m f)))
-  (then [m ma] (bind m (fn [x] ma)))
+  (then [ma mb] (bind ma (fn [a] (bind mb (fn [b] (return b))))))
   MonadPlus
   (mzero [m] (mempty m))
   (mplus [ma mb] (mappend ma mb)))
@@ -61,7 +95,7 @@
   Monad
   (join [m] m)
   (bind [m f]  (join (fmap m f)))
-  (then [m ma] (bind m (fn [x] ma)))
+  (then [ma mb] ma)
   MonadPlus
   (mzero [m] (mempty m))
   (mplus [ma mb] (mappend ma mb)))
@@ -70,24 +104,6 @@
   ([]    (EmptySet.))
   ([x]   (UnitSet. x))
   ([_ x] (UnitSet. x)))
-
-(defmacro >>= [m & fs]
-  `(-> ~m ~@(map (fn [f] (if (list? f)
-                           `(bind #(~(first f) % ~@(rest f)))
-                           `(bind ~f))) fs)))
-
-(defmacro >> [m & ms]
-  `(-> ~m ~@(map (fn [m] `(then ~m)) ms)))
-
-(defmacro domonad [bindings & body]
-  (let [next (nthrest bindings 2)]
-    (if (seq next)
-      `(bind ~(second bindings)
-             (fn [~(first bindings)]
-               (domonad [~@next] ~@body)))
-      `(bind ~(second bindings)
-             (fn [~(first bindings)]
-               ~@body)))))
 
 (defn guard
   ([exp] (if exp (return) (return nil)))
@@ -101,8 +117,8 @@
            (list ma
                  (cond (sequential? mb) mb
                        (empty-set?  mb) '()
-                       (unit-set?   mb) (list (:= mb)))
-                 :else (list mb))))
+                       (unit-set?   mb) (list (:<- mb))
+                       :else (list mb)))))
   (mconcat [m] (mappend m (mempty m)))
   Functor
   (fmap [m f] (map f m))
@@ -113,11 +129,11 @@
         (let [a (join %)]
           (cond (sequential? a) a
                 (empty-set?  a) '()
-                (unit-set?   a) (list (:= a))
+                (unit-set?   a) (list (:<- a))
                 :else (list a)))
         (list %)) m))
   (bind [m f]  (join (fmap m f)))
-  (then [m ma] (bind m (fn [x] ma)))
+  (then [ma mb] (bind ma (fn [a] (bind mb (fn [b] (return b))))))
   MonadPlus
   (mzero [m] (mempty m))
   (mplus [ma mb] (mappend ma mb)))
@@ -128,8 +144,8 @@
 
 (defn maybe? [m] (satisfies? Maybe m))
 
-(defrecord Just [=])
-(defrecord Nothing [=])
+(defrecord Just [<-])
+(defrecord Nothing [<-])
 
 (extend-type Just
   Monoid
@@ -137,24 +153,24 @@
   (mappend [ma mb]
     (let [mc (cond (maybe?     mb) mb
                    (empty-set? mb) (Nothing. nil)
-                   (unit-set?  mb) (Just. (:= mb))
+                   (unit-set?  mb) (Just. (:<- mb))
                    :else (Just. mb))]
-      (if (nothing? mc) ma (Just. (mappend (:= ma) (:= mc))))))
+      (if (nothing? mc) ma (Just. (mappend (:<- ma) (:<- mc))))))
   (mconcat [m] (mappend m (mempty m)))
   Functor
-  (fmap [m f] (try (Just. (f (:= m)))
+  (fmap [m f] (try (Just. (f (:<- m)))
                    (catch Exception e (Nothing. e))))
   Monad
-  (join [m] (let [a (:= m)]
+  (join [m] (let [a (:<- m)]
               (if (monad? a)
                 (let [b (join a)]
                   (cond (maybe?     b) (join b)
                         (empty-set? b) (Nothing. nil)
-                        (unit-set?  b) (Just. (:= b))
+                        (unit-set?  b) (Just. (:<- b))
                         :else (Just. b)))
                 (Just. a))))
   (bind [m f]  (join (fmap m f)))
-  (then [m ma] (bind m (fn [x] ma)))
+  (then [ma mb] (bind ma (fn [a] (bind mb (fn [b] (return b))))))
   MonadPlus
   (mzero [m] (mempty m))
   (mplus [ma mb] (mappend ma mb))
@@ -168,12 +184,12 @@
   (mappend [ma mb]
     (let [mc (cond (maybe?     mb) mb
                    (empty-set? mb) (Nothing. nil)
-                   (unit-set?  mb) (Just. (:= mb))
+                   (unit-set?  mb) (Just. (:<- mb))
                    :else (Just. mb))]
       (if (nothing? mc) ma mc)))
   (mconcat [m] (mappend m (mempty m)))
   Functor
-  (fmap [m f] (Nothing. (:= m)))
+  (fmap [m f] (Nothing. (:<- m)))
   Monad
   (join [m] m)
   (bind [m f]  (join (fmap m f)))
